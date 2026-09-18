@@ -1,5 +1,10 @@
 package demo.reactividad.service;
 
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.UUID;
+
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,76 +16,97 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 
 import demo.reactividad.dto.request.MenuCreateRequestDTO;
 import demo.reactividad.dto.response.MenuResponseDTO;
+import demo.reactividad.entity.Menu;
+import demo.reactividad.repository.MenuRepository;
+import demo.reactividad.testcontainers.AbstractPostgresContainerTest;
 import reactor.test.StepVerifier;
 
-@AutoConfigureWebTestClient
-@SpringBootTest
-public class MenuServiceTest {
+@AutoConfigureWebTestClient // Llamadas httpreales
+@SpringBootTest // Arranca todo el ecosistema
+class MenuServiceTest extends AbstractPostgresContainerTest {
 
+    private static final String MENU_PATH = "/api/v1/menu";
+    private static final String AUTH_HEADER = "auth-token";
+    private static final String STANDARD_TOKEN = "secret123";
+    private static final String PRIME_TOKEN = "secret456";
+    private static final Duration STREAM_TIMEOUT = Duration.ofSeconds(5);
     private static final Logger log = LoggerFactory.getLogger(MenuServiceTest.class);
 
     @Autowired
     private WebTestClient webTestClient;
 
+    @Autowired
+    private MenuRepository menuRepository;
+
+    private Menu existingMenu;
+
+    @BeforeEach
+    void setUp() {
+        this.existingMenu = this.menuRepository.deleteAll()
+                .then(this.menuRepository.save(new Menu("DEVOS", "Menu de prueba")))
+                .block();
+    }
+
     @Test
-    public void getMenu_Success() {
-        String path = "/api/v1/menu";
-        String id = "/{menuId}";
+    void getMenu_Success() {
         this.webTestClient.get()
-                .uri(path + id, "a0814b88-87c3-4c56-a08e-c95c92fc7894")
-                .header("auth-token", "secret123")
-                // .headers(h -> h.setBearerAuth(id))
+                .uri(MENU_PATH + "/{menuId}", this.existingMenu.getId())
+                .header(AUTH_HEADER, STANDARD_TOKEN)
                 .exchange()
                 .expectStatus().is2xxSuccessful()
                 .expectHeader().contentType(MediaType.APPLICATION_JSON)
                 .expectBody()
-                .consumeWith(r -> log.info("{}", new String(r.getResponseBody())))
-                .jsonPath("$.menuId").isEqualTo("a0814b88-87c3-4c56-a08e-c95c92fc7894");
+                .consumeWith(r -> log.info("{}", new String(r.getResponseBody(), StandardCharsets.UTF_8)))
+                .jsonPath("$.menuId").isEqualTo(this.existingMenu.getId().toString());
     }
 
     @Test
-    public void getMenu_Unauthorized() {
+    void getMenu_Unauthorized() {
         this.webTestClient.get()
-                .uri("/api/v1/menu/a0814b88-87c3-4c56-a08e-c95c92fc7894")
+                .uri(MENU_PATH + "/{menuId}", this.existingMenu.getId())
                 .exchange()
                 .expectStatus().isUnauthorized();
     }
 
     @Test
-    public void getMenu_NotFound() {
+    void getMenu_NotFound() {
+        UUID unknownMenuId = UUID.randomUUID();
+
         this.webTestClient.get()
-                .uri("/api/v1/menu/a0814b88-87c3-4c56-a08e-c95c92fc7893")
-                .header("auth-token", "secret123")
+                .uri(MENU_PATH + "/{menuId}", unknownMenuId)
+                .header(AUTH_HEADER, STANDARD_TOKEN)
                 .exchange()
                 .expectStatus().is4xxClientError()
                 .expectHeader().contentType(MediaType.APPLICATION_JSON)
                 .expectBody()
-                .consumeWith(r -> log.info("{}", new String(r.getResponseBody())))
-                .jsonPath("$.message").isEqualTo("Menu with id a0814b88-87c3-4c56-a08e-c95c92fc7893 not found");
+                .consumeWith(r -> log.info("{}", new String(r.getResponseBody(), StandardCharsets.UTF_8)))
+                .jsonPath("$.message").isEqualTo("Menu with id " + unknownMenuId + " not found");
     }
 
     @Test
-    public void postMenu_Sucess() {
+    void postMenu_Success() {
         MenuCreateRequestDTO menu = new MenuCreateRequestDTO("Test", "Test description");
+
         this.webTestClient.post()
-                .uri("/api/v1/menu/")
-                .header("auth-token", "secret456")
+                .uri(MENU_PATH + "/")
+                .header(AUTH_HEADER, PRIME_TOKEN)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(menu)
                 .exchange()
                 .expectStatus().is2xxSuccessful()
                 .expectHeader().contentType(MediaType.APPLICATION_JSON)
                 .expectBody()
-                .consumeWith(r -> log.info("{}", new String(r.getResponseBody())))
+                .consumeWith(r -> log.info("{}", new String(r.getResponseBody(), StandardCharsets.UTF_8)))
                 .jsonPath("$.menuTitle").isEqualTo(menu.menuTitle());
     }
 
     @Test
-    public void postMenu_Forbbiden() {
+    void postMenu_Forbidden() {
         MenuCreateRequestDTO menu = new MenuCreateRequestDTO("Test", "Test description");
+
         this.webTestClient.post()
-                .uri("/api/v1/menu/")
-                .header("auth-token", "secret123")
+                .uri(MENU_PATH + "/")
+                .header(AUTH_HEADER, STANDARD_TOKEN)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(menu)
                 .exchange()
@@ -88,47 +114,30 @@ public class MenuServiceTest {
     }
 
     @Test
-    public void getMenuStream_Success() {
+    void getMenuStream_Success() {
+        String streamMenuTitle = "Stream menu";
+        MenuCreateRequestDTO menu = new MenuCreateRequestDTO(streamMenuTitle, "Streamed via SSE");
+
+        this.webTestClient.post()
+                .uri(MENU_PATH + "/")
+                .header(AUTH_HEADER, PRIME_TOKEN)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(menu)
+                .exchange()
+                .expectStatus().is2xxSuccessful();
+
         this.webTestClient
                 .get()
-                .uri("/api/v1/menu/stream")
-                .header("auth-token", "secret123")
+                .uri(MENU_PATH + "/stream")
+                .header(AUTH_HEADER, STANDARD_TOKEN)
                 .accept(MediaType.TEXT_EVENT_STREAM)
                 .exchange()
                 .expectStatus().is2xxSuccessful()
                 .returnResult(MenuResponseDTO.class)
                 .getResponseBody()
                 .as(StepVerifier::create)
-                .expectNextMatches(menu -> menu.menuTitle().equals("Stream menu"))
-                .expectComplete()
-                .verify();
-
-        // 2. Evaluamos el stream
-        // StepVerifier.create(responseStream)
-
-        // // 3. ¡EL TRUCO! Una vez que el test ya se conectó al stream,
-        // // disparamos la creación de un evento en un hilo secundario.
-        // .then(() -> {
-        // // Opción A: Si tienes tu repositorio inyectado en el test
-        // // menuRepository.save(new Menu(...)).subscribe();
-
-        // // Opción B: Hacer una petición POST real a tu propio endpoint
-        // this.webTestClient.post()
-        // .uri("/api/v1/menu/")
-        // .header("auth-token", "secret123")
-        // .bodyValue(new MenuCreateRequestDTO("Stream Menu", "Desc"))
-        // .exchange()
-        // .expectStatus().is2xxSuccessful();
-        // })
-
-        // // 4. Ahora el stream debería detectar la creación y emitirla hacia aquí
-        // .expectNextMatches(menu -> menu.menuTitle().equals("Stream Menu"))
-
-        // // 5. Cancelamos la conexión para no quedarnos escuchando infinitamente
-        // .thenCancel()
-
-        // // 6. Verificamos (con un timeout de seguridad interno del StepVerifier)
-        // .verify(Duration.ofSeconds(10));
+                .expectNextMatches(received -> received.menuTitle().equals(streamMenuTitle))
+                .thenCancel()
+                .verify(STREAM_TIMEOUT);
     }
-
 }
